@@ -73,6 +73,8 @@ class AESGCMCipher {
     }
 }
 
+export const MAX_DECOMPRESSED_FRAME_BYTES = 16 * 1024 * 1024;
+
 function compress(data: Buffer): Buffer {
     const compressed = deflateRawSync(data);
     const result = Buffer.alloc(4 + compressed.length);
@@ -81,12 +83,87 @@ function compress(data: Buffer): Buffer {
     return result;
 }
 
-function decompress(data: Buffer): Buffer {
+export function decompressGatewayFrame(data: Buffer, maxBytes: number = MAX_DECOMPRESSED_FRAME_BYTES): Buffer {
     if (data.length < 4) throw new Error('Data too short');
-    return inflateRawSync(data.slice(4));
+    const declaredLength = data.readUInt32LE(0);
+    if (declaredLength > maxBytes) {
+        throw new Error(`Decompressed frame size ${declaredLength} exceeds limit ${maxBytes}`);
+    }
+    return inflateRawSync(data.slice(4), {maxOutputLength: maxBytes});
 }
 
-class ECJPAKE {
+function isBlockedIpv4(ip: string, allowLoopback: boolean): boolean {
+    const parts = ip.split('.');
+    if (parts.length !== 4 || !parts.every((part) => /^\d{1,3}$/.test(part))) return false;
+    const nums = parts.map(Number);
+    if (nums.some((n) => n < 0 || n > 255)) return true;
+    const [a, b] = nums;
+    if (a === 0) return true;
+    if (a === 127) return !allowLoopback;
+    if (a === 169 && b === 254) return true;
+    if (a >= 224) return true;
+    return false;
+}
+
+function isBlockedGatewayHost(rawHostname: string, allowLoopback: boolean): boolean {
+    const host = rawHostname.toLowerCase().replace(/^\[|\]$/g, '');
+    if (!host) return true;
+    if (host === 'localhost' || host.endsWith('.localhost')) return !allowLoopback;
+    if (host === 'metadata.google.internal' || host === 'metadata') return true;
+    if (host === '0.0.0.0' || host === '::' || host === '0:0:0:0:0:0:0:0') return true;
+    if (host === '::1' || host === '0:0:0:0:0:0:0:1') return !allowLoopback;
+    if (isBlockedIpv4(host, allowLoopback)) return true;
+    if (/^fe[89ab][0-9a-f]:/.test(host) || /^ff[0-9a-f]{2}:/.test(host)) return true;
+    const mappedV4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(host);
+    if (mappedV4) return isBlockedIpv4(mappedV4[1], allowLoopback);
+    const mappedHex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(host);
+    if (mappedHex) {
+        const hi = parseInt(mappedHex[1], 16);
+        const lo = parseInt(mappedHex[2], 16);
+        const ipv4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+        return isBlockedIpv4(ipv4, allowLoopback);
+    }
+    return false;
+}
+
+export interface ValidateGatewayUrlOptions {
+    allowLoopback?: boolean;
+}
+
+/**
+ * 校验并规范化米家网关 URL，拦截凭据注入、查询参数注入及本机/链路本地元数据 SSRF 地址。
+ */
+export function validateGatewayUrl(rawUrl: string, options: ValidateGatewayUrlOptions = {}): URL {
+    let parsed: URL;
+    try {
+        parsed = new URL(rawUrl.trim());
+    } catch {
+        throw new Error('网关地址格式无效，应为 http://<网关IP> 或 https://<网关IP>');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`不支持的网关协议: ${parsed.protocol}，仅支持 http 或 https`);
+    }
+    if (parsed.username || parsed.password) {
+        throw new Error('网关地址不能包含用户名或密码');
+    }
+    if (parsed.search || parsed.hash) {
+        throw new Error('网关地址不能包含查询参数或片段');
+    }
+    if (isBlockedGatewayHost(parsed.hostname, Boolean(options.allowLoopback))) {
+        throw new Error(`拒绝连接受限的网关地址: ${parsed.hostname}`);
+    }
+    return parsed;
+}
+
+/** 规范化网关基准地址（用于比较两个网关 URL 是否指向同一网关） */
+export function normalizeGatewayBaseUrl(rawUrl: string, options?: ValidateGatewayUrlOptions): string {
+    const parsed = validateGatewayUrl(rawUrl, options);
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    const pathname = parsed.pathname.replace(/\/+$/, '');
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}:${port}${pathname}`;
+}
+
+export class ECJPAKE {
     private role: string;
     private peerRole: string;
     private secretBytes: Buffer;
@@ -128,11 +205,16 @@ class ECJPAKE {
     }
 
     private decodePoint(data: Buffer): unknown {
-        if (data[0] !== 65 || data[1] !== 4) throw new Error('Invalid point format');
-        return EC.keyFromPublic({
+        if (data.length < 66 || data[0] !== 65 || data[1] !== 4) throw new Error('Invalid point format');
+        const key = EC.keyFromPublic({
             x: data.slice(2, 34).toString('hex'),
             y: data.slice(34, 66).toString('hex')
-        }).getPublic();
+        });
+        const validation = key.validate();
+        if (!validation.result) {
+            throw new Error(`Invalid EC point: ${validation.reason || 'not on curve'}`);
+        }
+        return key.getPublic();
     }
 
     private zkpHash(g: unknown, v: unknown, publicPoint: unknown, name: string): BN {
@@ -274,14 +356,12 @@ export class GatewayClient {
     private frameErrorLastPrint = 0;
     private static readonly FRAME_ERROR_SUMMARY_INTERVAL_MS = 60000;
 
-    private static parseUrl(url: string): string {
-        const match = url.match(/^(https?):\/\/([^/:]+)(?::(\d+))?((?:\/.*)?)/);
-        if (!match) throw new Error('Invalid URL');
-        const [, protocol, host, port, path] = match;
-        const wsProtocol = protocol === 'https' ? 'wss' : 'ws';
-        const wsPort = port || (protocol === 'https' ? '443' : '80');
-        const wsPath = (path || '').replace(/\/$/, '');
-        return `${wsProtocol}://${host}:${wsPort}${wsPath}/centrallinkws/`;
+    static parseUrl(url: string, options?: ValidateGatewayUrlOptions): string {
+        const parsed = validateGatewayUrl(url, options);
+        const wsProtocol = parsed.protocol === 'https:' ? 'wss' : 'ws';
+        const wsPort = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+        const wsPath = parsed.pathname.replace(/\/+$/, '');
+        return `${wsProtocol}://${parsed.hostname}:${wsPort}${wsPath}/centrallinkws/`;
     }
 
     async connect(gatewayUrl: string): Promise<void> {
@@ -444,7 +524,7 @@ export class GatewayClient {
 
         try {
             const decrypted = this.cipherIn!.decrypt(data.slice(1));
-            const decompressed = decompress(decrypted);
+            const decompressed = decompressGatewayFrame(decrypted);
             const response = JSON.parse(decompressed.toString('utf8'));
 
             if ('id' in response) {

@@ -161,9 +161,10 @@ export function loadSkills(): Skill[] {
         console.log(`[Skill] 已加载（项目级）: ${skill.name}`);
     }
 
-    // 2. 用户级 Skills
+    // 2. 用户级 Skills（默认隔离，需显式开启 OH_MY_SAGE_LOAD_USER_SKILLS=true）
+    const loadUserSkills = (process.env.OH_MY_SAGE_LOAD_USER_SKILLS || '').trim().toLowerCase() === 'true';
     const homeDir = process.env.HOME || process.env.USERPROFILE;
-    if (homeDir) {
+    if (loadUserSkills && homeDir) {
         const userSkillsDir = path.join(homeDir, '.agents', 'skills');
         const userSkills = scanSkillsDirectory(userSkillsDir);
         for (const skill of userSkills) {

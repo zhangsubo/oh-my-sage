@@ -4,7 +4,8 @@
  */
 
 // Gateway
-export { GatewayClient } from './gateway/client';
+export { GatewayClient, validateGatewayUrl, normalizeGatewayBaseUrl, decompressGatewayFrame, MAX_DECOMPRESSED_FRAME_BYTES } from './gateway/client';
+export type { ValidateGatewayUrlOptions } from './gateway/client';
 export { createGatewayManager } from './gateway/manager';
 export type { GatewayManager } from './gateway/manager';
 

@@ -42,7 +42,6 @@ interface SessionMessage {
 }
 
 interface ChatProps {
-    passcode?: string;
     sessionId?: string;
     initialMessages?: SessionMessage[];
     onSessionCreated?: (sessionId: string, messages: SessionMessage[]) => void;
@@ -56,7 +55,6 @@ function generateMessageId(): string {
 }
 
 export default function Chat({
-                                 passcode: propPasscode,
                                  sessionId,
                                  initialMessages,
                                  onSessionCreated,
@@ -74,7 +72,6 @@ export default function Chat({
 
     const messagesContainerRef = useRef<HTMLDivElement>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
-    const passcode = propPasscode || '';
     const prevSessionIdRef = useRef<string | undefined>(sessionId);
     const initializedRef = useRef(false);
 
@@ -159,7 +156,7 @@ export default function Chat({
             const response = await fetch('/api/chat', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message: messageText, passcode, sessionId: currentSessionId}),
+                body: JSON.stringify({message: messageText, sessionId: currentSessionId}),
                 signal: abortController.signal,
             });
 
@@ -268,7 +265,7 @@ export default function Chat({
             abortControllerRef.current = null;
             setIsLoading(false);
         }
-    }, [isLoading, passcode, currentSessionId, onSessionCreated]);
+    }, [isLoading, currentSessionId, onSessionCreated]);
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
@@ -311,7 +308,12 @@ export default function Chat({
     const renderMarkdown = (content: string) => {
         if (!content) return null;
         return (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                disallowedElements={['img']}
+            >
+                {content}
+            </ReactMarkdown>
         );
     };
 

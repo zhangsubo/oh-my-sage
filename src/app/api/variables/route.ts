@@ -1,11 +1,15 @@
 import {NextRequest, NextResponse} from 'next/server';
 import {createVariable, deleteVariable, getVariableConfig, getVariables, getVariableValue, setVariable} from '@/core';
 import {getGateway, isGatewayConnected} from '@/server/gateway/shared';
+import {guardWebRequest} from '@/server/security/webAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
     const gateway = getGateway()!;
     const {searchParams} = new URL(request.url);
@@ -19,26 +23,49 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
-    const gateway = getGateway()!;
-    const {id, type, value, name, scope = 'global'} = await request.json();
+    let body: any;
+    try {
+        body = await request.json();
+    } catch {
+        return NextResponse.json({success: false, error: '无效的 JSON'}, {status: 400});
+    }
+    const {id, type, value, name, scope = 'global'} = body ?? {};
     if (!/^[a-zA-Z0-9]+$/.test(id || '') || !['number', 'string'].includes(type) || typeof value !== type) {
         return NextResponse.json({success: false, error: '变量参数无效'}, {status: 400});
     }
+    const gateway = getGateway()!;
     const result = await createVariable(gateway, id, type, value, name, scope);
     return NextResponse.json(result, {status: result.success ? 201 : 502});
 }
 
 export async function PATCH(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
+    let body: any;
+    try {
+        body = await request.json();
+    } catch {
+        return NextResponse.json({success: false, error: '无效的 JSON'}, {status: 400});
+    }
+    const {id, value, scope = 'global'} = body ?? {};
+    if (typeof id !== 'string' || !['number', 'string'].includes(typeof value)) {
+        return NextResponse.json({success: false, error: '变量参数无效'}, {status: 400});
+    }
     const gateway = getGateway()!;
-    const {id, value, scope = 'global'} = await request.json();
-    if (typeof id !== 'string' || !['number', 'string'].includes(typeof value)) return NextResponse.json({success: false, error: '变量参数无效'}, {status: 400});
     const result = await setVariable(gateway, id, value, scope);
     return NextResponse.json(result, {status: result.success ? 200 : 502});
 }
 
 export async function DELETE(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
     const gateway = getGateway()!;
     const {searchParams} = new URL(request.url);

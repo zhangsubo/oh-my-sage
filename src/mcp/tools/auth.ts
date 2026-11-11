@@ -5,14 +5,16 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { GatewayManager } from "../../core/gateway/manager.js";
-import { getConfig } from "../config.js";
+import { normalizeGatewayBaseUrl, validateGatewayUrl } from "../../core/index.js";
+import { getConfig, type Config } from "../config.js";
 import { formatJson, textResult } from "../utils.js";
 
 export function registerAuthTools(
   server: McpServer,
-  gatewayManager: GatewayManager
+  gatewayManager: GatewayManager,
+  userConfig?: Config
 ): void {
-  const config = getConfig();
+  const config = getConfig(userConfig);
 
   // ==================== mijia_auth ====================
   server.registerTool(
@@ -71,10 +73,26 @@ Error Handling:
         );
       }
       try {
-        const url = gateway_url || config.gatewayUrl;
+        const configuredUrl = config.gatewayUrl || process.env.GATEWAY_URL || "";
+        const allowOverride = (process.env.MCP_ALLOW_GATEWAY_OVERRIDE || "").toLowerCase() === "true";
+        if (configuredUrl && gateway_url && !allowOverride) {
+          const sameTarget = normalizeGatewayBaseUrl(gateway_url) === normalizeGatewayBaseUrl(configuredUrl);
+          if (!sameTarget) {
+            return textResult(
+              formatJson({
+                success: false,
+                error: "服务端已固定配置 GATEWAY_URL，禁止通过 gateway_url 参数覆盖网关地址；如需动态切换网关，请设置 MCP_ALLOW_GATEWAY_OVERRIDE=true",
+              }),
+              undefined,
+              true
+            );
+          }
+        }
+        const url = (configuredUrl && !allowOverride) ? configuredUrl : (gateway_url || configuredUrl);
         if (!url) {
           return textResult(formatJson({ success: false, error: "未配置网关地址：请在 gateway_url 参数中提供网关地址，或在 MCP 配置里设置 GATEWAY_URL 环境变量" }), undefined, true);
         }
+        validateGatewayUrl(url);
         await gatewayManager.connect(passcode, url);
         return textResult(
           formatJson({ success: true, message: "连接成功", gateway_url: url }),

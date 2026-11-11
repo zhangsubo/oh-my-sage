@@ -25,6 +25,7 @@ export const DEFAULT_HTTP_PORT = 3790;
 export const MCP_PATH = "/mcp";
 export const HEALTH_PATH = "/healthz";
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_MAX_SESSIONS = 64;
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "[::1]"];
 
@@ -37,8 +38,12 @@ export interface HttpOptions {
   authToken?: string;
   /** 允许的 Host 主机名（不含端口），用于防 DNS rebinding */
   allowedHosts: string[];
+  /** 允许携带的浏览器 Origin 列表（完整 origin，如 http://127.0.0.1:3000）；默认空（拒绝一切带 Origin 的浏览器跨站请求） */
+  allowedOrigins: string[];
   /** 会话空闲多久后回收（毫秒） */
   sessionTtlMs: number;
+  /** 最大并发会话数 */
+  maxSessions: number;
 }
 
 export interface StartHttpOptions extends Partial<HttpOptions> {
@@ -96,6 +101,19 @@ export function defaultAllowedHosts(bindHost: string): string[] {
   return [...hosts];
 }
 
+/** 规范化 Origin 头（仅保留 protocol://host），无效返回 null */
+function normalizeOrigin(origin: string): string | null {
+  const trimmed = origin.trim();
+  if (!trimmed || trimmed.toLowerCase() === "null") return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /** 从环境变量解析 HTTP 配置 */
 export function resolveHttpOptions(env: Record<string, string | undefined>): HttpOptions {
   const host = (env.MCP_HTTP_HOST || DEFAULT_HTTP_HOST).trim();
@@ -109,17 +127,33 @@ export function resolveHttpOptions(env: Record<string, string | undefined>): Htt
   if (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0) {
     throw new Error(`MCP_SESSION_TTL_MINUTES 无效: ${ttlText}`);
   }
+  const maxSessionsText = (env.MCP_MAX_SESSIONS || "").trim();
+  const maxSessions = maxSessionsText ? Number(maxSessionsText) : DEFAULT_MAX_SESSIONS;
+  if (!Number.isInteger(maxSessions) || maxSessions <= 0) {
+    throw new Error(`MCP_MAX_SESSIONS 无效: ${maxSessionsText}`);
+  }
   const allowed = (env.MCP_ALLOWED_HOSTS || "")
     .split(",")
     .map((h) => h.trim())
     .filter(Boolean)
     .map(normalizeHostname);
+  const allowedOrigins = (env.MCP_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean)
+    .map((o) => {
+      const normalized = normalizeOrigin(o);
+      if (!normalized) throw new Error(`MCP_ALLOWED_ORIGINS 包含无效 Origin: ${o}`);
+      return normalized;
+    });
   return {
     host,
     port,
     authToken: env.MCP_AUTH_TOKEN || undefined,
     allowedHosts: allowed.length > 0 ? [...new Set([...LOOPBACK_HOSTS, ...allowed])] : defaultAllowedHosts(host),
+    allowedOrigins: [...new Set(allowedOrigins)],
     sessionTtlMs: ttlMinutes * 60000,
+    maxSessions,
   };
 }
 
@@ -192,7 +226,11 @@ export async function startHttpServer(options: StartHttpOptions = {}): Promise<R
   const port = options.port ?? DEFAULT_HTTP_PORT;
   const authToken = options.authToken || undefined;
   const allowedHosts = (options.allowedHosts ?? defaultAllowedHosts(host)).map(normalizeHostname);
+  const allowedOrigins = (options.allowedOrigins ?? [])
+    .map((o) => normalizeOrigin(o))
+    .filter((o): o is string => Boolean(o));
   const sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
 
   if (!isLoopbackHost(host) && !authToken) {
     throw new Error(
@@ -247,22 +285,43 @@ export async function startHttpServer(options: StartHttpOptions = {}): Promise<R
     }
   };
 
-  // 空闲回收：只回收没有进行中请求、且超过 TTL 未活动的会话
-  const sweepTimer = setInterval(() => {
+  const sweepExpiredSessions = (): void => {
     const now = Date.now();
     for (const entry of [...sessions.values()]) {
       if (entry.active <= 0 && now - entry.lastSeen > sessionTtlMs) void closeSession(entry);
     }
-  }, options.sweepIntervalMs ?? 60_000);
+  };
+
+  // 空闲回收：只回收没有进行中请求、且超过 TTL 未活动的会话
+  const sweepTimer = setInterval(sweepExpiredSessions, options.sweepIntervalMs ?? 60_000);
   sweepTimer.unref();
+
+  /** 校验 Host 与浏览器 Origin 头（防止 DNS rebinding 与浏览器跨站请求伪造） */
+  const checkHostAndOrigin = (req: http.IncomingMessage, res: http.ServerResponse, asRpc: boolean): boolean => {
+    const hostname = hostnameOf(req.headers.host);
+    if (!hostname || !allowedHosts.includes(hostname)) {
+      const msg = `Host 不在允许列表中: ${req.headers.host ?? "(缺失)"}，请设置 MCP_ALLOWED_HOSTS`;
+      if (asRpc) sendRpcError(res, 403, -32000, msg);
+      else sendJson(res, 403, { error: msg });
+      return false;
+    }
+    const rawOrigin = Array.isArray(req.headers.origin) ? req.headers.origin[0] : req.headers.origin;
+    if (rawOrigin !== undefined) {
+      const normalized = normalizeOrigin(rawOrigin);
+      if (!normalized || !allowedOrigins.includes(normalized)) {
+        const msg = `Origin 不在允许列表中: ${rawOrigin}，浏览器跨域访问请显式设置 MCP_ALLOWED_ORIGINS`;
+        if (asRpc) sendRpcError(res, 403, -32000, msg);
+        else sendJson(res, 403, { error: msg });
+        return false;
+      }
+    }
+    return true;
+  };
 
   // ==================== 路由 ====================
 
   const handleMcp = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
-    // 防 DNS rebinding：校验 Host（按主机名比较，与端口映射无关）
-    const hostname = hostnameOf(req.headers.host);
-    if (!hostname || !allowedHosts.includes(hostname)) {
-      sendRpcError(res, 403, -32000, `Host 不在允许列表中: ${req.headers.host ?? "(缺失)"}，请设置 MCP_ALLOWED_HOSTS`);
+    if (!checkHostAndOrigin(req, res, true)) {
       return;
     }
 
@@ -282,6 +341,11 @@ export async function startHttpServer(options: StartHttpOptions = {}): Promise<R
 
     let body: unknown;
     if (method === "POST") {
+      const contentType = (req.headers["content-type"] || "").toLowerCase();
+      if (!contentType.startsWith("application/json")) {
+        sendRpcError(res, 415, -32000, "Unsupported Media Type: Content-Type 必须为 application/json");
+        return;
+      }
       let text: string;
       try {
         text = await readBody(req);
@@ -309,6 +373,13 @@ export async function startHttpServer(options: StartHttpOptions = {}): Promise<R
     }
 
     if (method === "POST" && containsInitialize(body)) {
+      if (sessions.size >= maxSessions) {
+        sweepExpiredSessions();
+      }
+      if (sessions.size >= maxSessions) {
+        sendRpcError(res, 503, -32000, `活跃会话数已达上限 (${maxSessions})，请稍后重试`);
+        return;
+      }
       const entry = await createSession();
       await dispatch(entry, req, res, body);
       // 初始化失败（未分配会话 ID）时释放实例
@@ -322,8 +393,9 @@ export async function startHttpServer(options: StartHttpOptions = {}): Promise<R
   const httpServer = http.createServer((req, res) => {
     const pathname = (req.url || "/").split("?")[0];
 
-    // 健康检查：无需认证，不含敏感信息
+    // 健康检查：校验 Host/Origin，无需 Bearer 认证，不含敏感信息
     if (pathname === HEALTH_PATH && (req.method === "GET" || req.method === "HEAD")) {
+      if (!checkHostAndOrigin(req, res, false)) return;
       sendJson(res, 200, { ok: true, connected: gatewayManager.isConnected() });
       return;
     }

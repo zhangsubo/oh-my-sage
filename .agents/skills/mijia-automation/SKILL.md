@@ -72,7 +72,7 @@ video → ui-sample → graph-diff → local-tested → gateway-roundtrip → ru
 3. 检查 `src/core/tools/variable.ts`、`src/mcp/tools/variable.ts` 和实际运行的 `dist`，确认功能是未实现、未构建还是未加载。
 4. `mijia_set_variable` 返回变量不存在时，改用 `mijia_create_variable`，不要尝试用规则节点自动创建。
 5. `mijia_call_api` 拒绝 `createVar` 等写方法时，改用专用工具，不要放宽通用工具的只读白名单。
-6. 若怀疑功能曾存在但被回归删除，检查 Git 历史或 Session 中的真实工具调用记录，再下结论。
+6. 若怀疑功能曾存在但被回归删除，检查仓库 Git 历史与测试记录，再下结论。
 
 实机验证过的生命周期：创建临时变量 -> 读取配置和值 -> 修改 -> 回读 -> 删除 -> 再次读取确认不存在。创建或恢复变量工具后应完整执行一次该流程，并清理临时变量。
 
@@ -198,7 +198,7 @@ MCP 模式下**创建**超过 10 个节点的复杂规则时，不要调用两�
 
 ### 修改已有规则：用紧凑文本，一条规则一读一写
 
-读写已有规则时优先使用 [规则文本格式](../../../docs/rule-text-format.md)，不要来回传节点 JSON。MCP 与 Web Agent 都有这组工具，参数相同；下文写 MCP 工具名，Web Agent 去掉 `mijia_` 前缀即可（`get_graph`、`patch_graph`、`put_graph_text`、`query_rules`、`get_log`、`check_layout`）。
+读写已有规则时优先使用 [规则文本格式](references/rule-text-format.md)，不要来回传节点 JSON。MCP 与 Web Agent 都有这组工具，参数相同；下文写 MCP 工具名，Web Agent 去掉 `mijia_` 前缀即可（`get_graph`、`patch_graph`、`put_graph_text`、`query_rules`、`get_log`、`check_layout`）。
 
 1. **读**：`mijia_get_graph {id, format:"text"}` 一次拿到备注（Markdown）和全部节点（一行一个）以及 `hash`。大规则只看相关部分：`focus:["节点ID"], depth:1`。已读过且只想确认没变：`ifNoneMatch:<hash>`。
 2. **找引用**：「谁在读某变量 / 谁在写某设备属性」用 `mijia_query_rules {variable:"$livingOccupied"}` 或 `{device:"客厅音箱", property:"2/1"}`，不要逐条读规则。

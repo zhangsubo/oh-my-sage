@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG = {
 
 // 配置 Schema
 export const ConfigSchema = z.object({
-  gatewayUrl: z.string().url().optional(),
+  gatewayUrl: z.union([z.string().url(), z.literal("")]).optional(),
   connectTimeout: z.number().positive().optional(),
   apiTimeout: z.number().positive().optional(),
 });

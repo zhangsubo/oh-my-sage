@@ -3,11 +3,12 @@
  * 使用已建立的 WebSocket 连接进行对话
  */
 
-import {NextRequest} from 'next/server';
+import {NextRequest, NextResponse} from 'next/server';
 import {getGateway, isGatewayConnected} from '@/server/gateway/shared';
 import {Agent} from '@/server/agent/agent';
 import {getModelConfigFromEnv} from '@/server/ai/model';
-import {getSessionStore} from '@/server/session/store';
+import {getSessionStore, isValidSessionId} from '@/server/session/store';
+import {guardWebRequest} from '@/server/security/webAuth';
 
 export const runtime = 'nodejs';
 
@@ -15,23 +16,33 @@ export const runtime = 'nodejs';
  * POST /api/chat
  */
 export async function POST(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         const body = await request.json();
-        const {message, sessionId} = body;
+        const {message, sessionId} = body ?? {};
 
-        if (!message) {
-            return new Response(
-                JSON.stringify({error: '缺少消息内容'}),
-                {status: 400, headers: {'Content-Type': 'application/json'}}
-            );
+        if (typeof message !== 'string' || !message.trim()) {
+            return NextResponse.json({error: '缺少消息内容'}, {status: 400});
         }
 
         // 检查网关连接
         if (!isGatewayConnected()) {
-            return new Response(
-                JSON.stringify({error: '请先登录连接网关'}),
-                {status: 400, headers: {'Content-Type': 'application/json'}}
-            );
+            return NextResponse.json({error: '请先登录连接网关'}, {status: 400});
+        }
+
+        const store = getSessionStore();
+        let resolvedSessionId: string | null = null;
+        if (sessionId !== undefined && sessionId !== null && sessionId !== '') {
+            if (typeof sessionId !== 'string' || !isValidSessionId(sessionId)) {
+                return NextResponse.json({error: '无效的 Session ID'}, {status: 400});
+            }
+            const existing = await store.getSessionMeta(sessionId);
+            if (!existing) {
+                return NextResponse.json({error: 'Session 不存在'}, {status: 404});
+            }
+            resolvedSessionId = sessionId;
         }
 
         // 使用已建立的连接
@@ -39,12 +50,10 @@ export async function POST(request: NextRequest) {
         const config = getModelConfigFromEnv();
         const agent = new Agent(gateway, config);
 
-        // 如果有 sessionId，加载历史
-        if (sessionId) {
-            await agent.loadSession(sessionId);
+        // 如果有 sessionId，加载历史；否则创建新 Session
+        if (resolvedSessionId) {
+            await agent.loadSession(resolvedSessionId);
         } else {
-            // 如果没有 sessionId，创建一个新的
-            const store = getSessionStore();
             const newSession = await store.createSession();
             agent.setSession(newSession.id);
         }
@@ -77,22 +86,19 @@ export async function POST(request: NextRequest) {
 
     } catch (error) {
         console.error('Chat API error:', error);
-        return new Response(
-            JSON.stringify({error: String(error)}),
-            {status: 500, headers: {'Content-Type': 'application/json'}}
-        );
+        return NextResponse.json({error: String(error)}, {status: 500});
     }
 }
 
 /**
  * GET /api/chat
  */
-export async function GET() {
-    return new Response(
-        JSON.stringify({
-            status: 'ok',
-            connected: isGatewayConnected(),
-        }),
-        {headers: {'Content-Type': 'application/json'}}
-    );
+export async function GET(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
+    return NextResponse.json({
+        status: 'ok',
+        connected: isGatewayConnected(),
+    });
 }

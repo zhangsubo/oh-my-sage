@@ -53,7 +53,7 @@ export function createServer(
   gatewayManager: GatewayManager = createGatewayManager(),
   drafts?: GraphDraftStore
 ): McpServer {
-  getConfig(userConfig);
+  const resolvedConfig = getConfig(userConfig);
 
   const server = new McpServer({
     name: SERVER_NAME,
@@ -61,7 +61,7 @@ export function createServer(
   });
 
   // 注册所有工具
-  registerAuthTools(server, gatewayManager);
+  registerAuthTools(server, gatewayManager, resolvedConfig);
   registerDeviceTools(server, gatewayManager);
   registerGraphTools(server, gatewayManager, drafts);
   registerVariableTools(server, gatewayManager);

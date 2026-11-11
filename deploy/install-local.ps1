@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   将 oh-my-sage MCP Server 安装为本机常驻服务（Windows，HTTP 模式，仅监听 127.0.0.1）。
 
@@ -23,6 +23,7 @@
 param(
   [string]$GatewayUrl = $env:GATEWAY_URL,
   [string]$Token = '',
+  [switch]$NoToken,
   [ValidateRange(1, 65535)][int]$Port = 3790,
   [string]$TaskName = 'oh-my-sage-mcp',
   [switch]$Uninstall
@@ -60,6 +61,10 @@ $node = (Get-Command node -ErrorAction Stop).Source
 $nodeVersion = [version]((& $node -v).TrimStart('v'))
 if ($nodeVersion -lt [version]'20.6.0') { throw "需要 Node.js 20.6 或更高版本（当前 $nodeVersion）" }
 if (-not $GatewayUrl) { Write-Warning '未设置 -GatewayUrl：首次调用 mijia_auth 时需要传 gateway_url' }
+if (-not $Token -and -not $NoToken) {
+  $Token = (& $node -e "process.stdout.write(require('node:crypto').randomBytes(24).toString('hex'))")
+  Write-Host '已自动生成本机服务访问 Token（如需无鉴权模式可传 -NoToken）'
+}
 
 # ==================== 写入配置 ====================
 $lines = @('MCP_HTTP_HOST=127.0.0.1', "MCP_HTTP_PORT=$Port")

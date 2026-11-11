@@ -1,10 +1,14 @@
 import {NextRequest, NextResponse} from 'next/server';
 import {validateGraphCapabilitiesWithGateway} from '@/core';
 import {getGateway, isGatewayConnected} from '@/server/gateway/shared';
+import {guardWebRequest} from '@/server/security/webAuth';
 
 export const runtime = 'nodejs';
 
 export async function POST(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
         const {graph} = await request.json();

@@ -2,35 +2,58 @@
 
 import React, {useState, useCallback, useRef} from 'react';
 import {Input, Button, message, Typography} from 'antd';
-import {LockOutlined, ThunderboltFilled} from '@ant-design/icons';
+import {LockOutlined, KeyOutlined, ThunderboltFilled} from '@ant-design/icons';
 
 const {Text} = Typography;
 
 interface LoginPageProps {
-    onLoginSuccess: (passcode: string) => void;
+    onLoginSuccess: () => void;
+    tokenRequired?: boolean;
+    gatewayConnected?: boolean;
 }
 
-export default function LoginPage({onLoginSuccess}: LoginPageProps) {
+export default function LoginPage({
+    onLoginSuccess,
+    tokenRequired = false,
+    gatewayConnected = false,
+}: LoginPageProps) {
     const [passcode, setPasscode] = useState('');
+    const [authToken, setAuthToken] = useState('');
     const [loading, setLoading] = useState(false);
     const isLoggingRef = useRef(false);
 
-    const doLogin = useCallback(async (code: string) => {
-        if (code.length !== 6 || isLoggingRef.current) return;
+    const canReuseConnectedGateway = gatewayConnected && tokenRequired;
+
+    const doLogin = useCallback(async (code: string, tokenValue: string) => {
+        if (isLoggingRef.current) return;
+        if (tokenRequired && !tokenValue.trim()) return;
+        if (!canReuseConnectedGateway && code.length !== 6) return;
+        if (canReuseConnectedGateway && code.length !== 0 && code.length !== 6) return;
+
         isLoggingRef.current = true;
         setLoading(true);
         try {
+            const payload: Record<string, string> = {};
+            if (code.length === 6) {
+                payload.passcode = code;
+            }
+            if (tokenRequired) {
+                payload.token = tokenValue.trim();
+            }
+
             const response = await fetch('/api/auth', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({passcode: code}),
+                body: JSON.stringify(payload),
             });
             const result = await response.json();
             if (result.success) {
+                setPasscode('');
+                setAuthToken('');
                 message.success('连接成功');
-                onLoginSuccess(code);
+                onLoginSuccess();
             } else {
-                message.error(result.message || '连接失败');
+                message.error(result.message || result.error || '连接失败');
                 isLoggingRef.current = false;
             }
         } catch (error) {
@@ -39,15 +62,19 @@ export default function LoginPage({onLoginSuccess}: LoginPageProps) {
         } finally {
             setLoading(false);
         }
-    }, [onLoginSuccess]);
+    }, [canReuseConnectedGateway, onLoginSuccess, tokenRequired]);
 
     const handlePasscodeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value.replace(/\D/g, '');
         setPasscode(value);
-        if (value.length === 6) {
-            setTimeout(() => doLogin(value), 0);
+        if (value.length === 6 && (!tokenRequired || authToken.trim().length > 0)) {
+            setTimeout(() => doLogin(value, authToken), 0);
         }
     };
+
+    const submitDisabled =
+        (tokenRequired && !authToken.trim()) ||
+        (canReuseConnectedGateway ? (passcode.length !== 0 && passcode.length !== 6) : passcode.length !== 6);
 
     return (
         <div style={{
@@ -106,10 +133,25 @@ export default function LoginPage({onLoginSuccess}: LoginPageProps) {
                     米家自动化极客版 AI Agent
                 </Text>
 
+                {tokenRequired && (
+                    <div style={{marginBottom: 16}}>
+                        <Input.Password
+                            prefix={<KeyOutlined style={{color: 'var(--text-muted)'}}/>}
+                            placeholder="输入 Web 访问口令"
+                            size="large"
+                            value={authToken}
+                            onChange={(e) => setAuthToken(e.target.value)}
+                            onPressEnter={() => !submitDisabled && doLogin(passcode, authToken)}
+                            disabled={loading}
+                            style={{borderRadius: 'var(--radius-md)'}}
+                        />
+                    </div>
+                )}
+
                 <div style={{marginBottom: 20}}>
                     <Input
                         prefix={<LockOutlined style={{color: 'var(--text-muted)'}}/>}
-                        placeholder="输入 6 位米家登录码"
+                        placeholder={canReuseConnectedGateway ? '可选：重输 6 位米家登录码' : '输入 6 位米家登录码'}
                         maxLength={6}
                         size="large"
                         value={passcode}
@@ -121,7 +163,7 @@ export default function LoginPage({onLoginSuccess}: LoginPageProps) {
                         }}
                     />
                     <Text style={{color: 'var(--text-muted)', fontSize: 11, marginTop: 8, display: 'block'}}>
-                        输入 6 位后自动连接
+                        {canReuseConnectedGateway ? '网关已连接，输入访问口令即可进入' : '输入 6 位后自动连接'}
                     </Text>
                 </div>
 
@@ -129,15 +171,15 @@ export default function LoginPage({onLoginSuccess}: LoginPageProps) {
                     type="primary"
                     size="large"
                     block
-                    onClick={() => doLogin(passcode)}
+                    onClick={() => doLogin(passcode, authToken)}
                     loading={loading}
-                    disabled={passcode.length !== 6}
+                    disabled={submitDisabled}
                     style={{
                         borderRadius: 'var(--radius-md)',
                         height: 44, fontSize: 15, fontWeight: 600,
                     }}
                 >
-                    {loading ? '正在连接网关...' : '连接网关'}
+                    {loading ? '正在连接网关...' : (canReuseConnectedGateway && !passcode ? '进入控制台' : '连接网关')}
                 </Button>
             </div>
         </div>

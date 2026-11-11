@@ -29,7 +29,17 @@ const MAX_DRAFTS = 20;
 const MAX_DRAFT_NODES = 500;
 const MAX_APPEND_BYTES = 128 * 1024;
 const MAX_DRAFT_BYTES = 2 * 1024 * 1024;
-const DEFAULT_STORE_PATH = path.join(os.tmpdir(), 'oh-my-sage-graph-drafts.json');
+
+function resolveDefaultDraftStorePath(): string {
+    const home = os.homedir();
+    if (home) {
+        return path.join(home, '.oh-my-sage', 'graph-drafts.json');
+    }
+    const uid = typeof process.getuid === 'function' ? String(process.getuid()) : 'user';
+    return path.join(os.tmpdir(), `oh-my-sage-${uid}`, 'graph-drafts.json');
+}
+
+const DEFAULT_STORE_PATH = resolveDefaultDraftStorePath();
 
 function clone<T>(value: T): T {
     return structuredClone(value);
@@ -201,8 +211,20 @@ export class GraphDraftStore {
         if (changed) this.persist();
     }
 
+    private assertNotSymlink(targetPath: string): void {
+        try {
+            const stat = fs.lstatSync(targetPath);
+            if (stat.isSymbolicLink()) {
+                throw new Error(`拒绝访问符号链接草稿文件: ${targetPath}`);
+            }
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+    }
+
     private readStore(): Record<string, GraphDraft> {
         try {
+            this.assertNotSymlink(this.storePath);
             return JSON.parse(fs.readFileSync(this.storePath, 'utf8')) as Record<string, GraphDraft>;
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error('[GraphDraft] 读取草稿失败', error);
@@ -219,7 +241,8 @@ export class GraphDraftStore {
 
     private persist(): void {
         const directory = path.dirname(this.storePath);
-        fs.mkdirSync(directory, { recursive: true });
+        fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+        this.assertNotSymlink(this.storePath);
         // ponytail: last-write-wins merge, switch to a file lock if drafts ever need cross-process edits of the same id
         const cutoff = Date.now() - DRAFT_TTL_MS;
         const merged: Record<string, GraphDraft> = {};
@@ -228,8 +251,8 @@ export class GraphDraftStore {
             merged[id] = draft;
         }
         for (const [id, draft] of this.drafts) merged[id] = draft;
-        const temporary = `${this.storePath}.${process.pid}.tmp`;
-        fs.writeFileSync(temporary, JSON.stringify(merged));
+        const temporary = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+        fs.writeFileSync(temporary, JSON.stringify(merged), { mode: 0o600 });
         fs.renameSync(temporary, this.storePath);
     }
 }

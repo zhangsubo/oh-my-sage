@@ -4,7 +4,8 @@
  */
 
 import {NextRequest, NextResponse} from 'next/server';
-import {getSessionStore} from '@/server/session/store';
+import {getSessionStore, isValidSessionId} from '@/server/session/store';
+import {guardWebRequest} from '@/server/security/webAuth';
 
 export const runtime = 'nodejs';
 
@@ -16,10 +17,19 @@ export async function GET(
     request: NextRequest,
     {params}: { params: { id: string } }
 ) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         const {id} = params;
-        const store = getSessionStore();
+        if (!isValidSessionId(id)) {
+            return NextResponse.json({
+                success: false,
+                error: '无效的 Session ID',
+            }, {status: 400});
+        }
 
+        const store = getSessionStore();
         const session = await store.getSessionMeta(id);
         if (!session) {
             return NextResponse.json({
@@ -53,8 +63,18 @@ export async function PATCH(
     request: NextRequest,
     {params}: { params: { id: string } }
 ) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         const {id} = params;
+        if (!isValidSessionId(id)) {
+            return NextResponse.json({
+                success: false,
+                error: '无效的 Session ID',
+            }, {status: 400});
+        }
+
         const text = await request.text();
         if (!text) {
             return NextResponse.json({success: false, error: '请求体为空'}, {status: 400});
@@ -77,9 +97,9 @@ export async function PATCH(
             }, {status: 404});
         }
 
-        const updates: any = {};
-        if (title !== undefined) updates.title = title;
-        if (isActive !== undefined) updates.isActive = isActive;
+        const updates: Record<string, unknown> = {};
+        if (typeof title === 'string') updates.title = title;
+        if (typeof isActive === 'boolean') updates.isActive = isActive;
 
         await store.updateSessionMeta(id, updates);
 
@@ -105,8 +125,18 @@ export async function POST(
     request: NextRequest,
     {params}: { params: { id: string } }
 ) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         const {id} = params;
+        if (!isValidSessionId(id)) {
+            return NextResponse.json({
+                success: false,
+                error: '无效的 Session ID',
+            }, {status: 400});
+        }
+
         const text = await request.text();
         if (!text) {
             return NextResponse.json({
@@ -126,7 +156,7 @@ export async function POST(
         const {action, seq} = body;
 
         if (action === 'truncate') {
-            if (typeof seq !== 'number' || seq < -1) {
+            if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < -1) {
                 return NextResponse.json({
                     success: false,
                     error: '缺少有效的 seq 参数',
@@ -134,6 +164,14 @@ export async function POST(
             }
 
             const store = getSessionStore();
+            const session = await store.getSessionMeta(id);
+            if (!session) {
+                return NextResponse.json({
+                    success: false,
+                    error: 'Session 不存在',
+                }, {status: 404});
+            }
+
             await store.truncateSession(id, seq);
 
             // 返回截断后的消息
@@ -166,11 +204,26 @@ export async function DELETE(
     request: NextRequest,
     {params}: { params: { id: string } }
 ) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         const {id} = params;
-        const store = getSessionStore();
+        if (!isValidSessionId(id)) {
+            return NextResponse.json({
+                success: false,
+                error: '无效的 Session ID',
+            }, {status: 400});
+        }
 
-        await store.deleteSession(id);
+        const store = getSessionStore();
+        const deleted = await store.deleteSession(id);
+        if (!deleted) {
+            return NextResponse.json({
+                success: false,
+                error: 'Session 不存在',
+            }, {status: 404});
+        }
 
         return NextResponse.json({
             success: true,

@@ -4,10 +4,10 @@
   "private": true,
 
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 127.0.0.1",
     "build": "next build",
     "build:mcp": "tsc -p tsconfig.mcp.json && node -e \"if(process.platform!=='win32')require('fs').chmodSync('dist/mcp/mcp/index.js',0o755)\"",
-    "start": "next start",
+    "start": "next start -H 127.0.0.1",
     "lint": "next lint",
     "test": "npx tsx src/test.ts",
     "test:unit": "tsx --test tests/**/*.test.ts",

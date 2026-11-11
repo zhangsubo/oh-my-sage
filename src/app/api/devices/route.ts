@@ -1,11 +1,15 @@
 import {NextRequest, NextResponse} from 'next/server';
 import {getGateway, isGatewayConnected} from '@/server/gateway/shared';
+import {guardWebRequest} from '@/server/security/webAuth';
 import {getDevice} from '@/core';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         const {searchParams} = new URL(request.url);
         const roomFilter = searchParams.get('room');

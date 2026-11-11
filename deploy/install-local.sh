@@ -11,14 +11,20 @@ set -euo pipefail
 GATEWAY_URL="${GATEWAY_URL:-}"
 PORT=3790
 TOKEN=""
+NO_TOKEN=0
 NAME="oh-my-sage-mcp"
 UNINSTALL=0
+
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
     -g|--gateway) GATEWAY_URL="$2"; shift 2 ;;
     -p|--port) PORT="$2"; shift 2 ;;
     -t|--token) TOKEN="$2"; shift 2 ;;
+    --no-token) NO_TOKEN=1; shift ;;
     -n|--name) NAME="$2"; shift 2 ;;
     -u|--uninstall) UNINSTALL=1; shift ;;
     -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
@@ -51,29 +57,42 @@ fi
 [ -f "$ENTRY" ] || { echo "未找到 $ENTRY。从仓库安装时请先执行 npm run build:mcp；也可以 npm install -g oh-my-sage-mcp 后运行包里的这个脚本" >&2; exit 1; }
 NODE="$(command -v node)" || { echo "未找到 node" >&2; exit 1; }
 [ -n "$GATEWAY_URL" ] || echo "提示：未设置 -g 网关地址，首次调用 mijia_auth 时需要传 gateway_url" >&2
+if [ -z "$TOKEN" ] && [ "$NO_TOKEN" = 0 ]; then
+  TOKEN="$("$NODE" -e "process.stdout.write(require('node:crypto').randomBytes(24).toString('hex'))")"
+  echo "已自动生成本机服务访问 Token（如需无鉴权模式可传 --no-token）" >&2
+fi
 
 # ==================== 注册服务 ====================
 if [ "$OS" = Darwin ]; then
   mkdir -p "$(dirname "$PLIST")" "$HOME/Library/Logs"
+  umask 077
+  XML_LABEL="$(xml_escape "$LABEL")"
+  XML_NODE="$(xml_escape "$NODE")"
+  XML_ENTRY="$(xml_escape "$ENTRY")"
+  XML_REPO="$(xml_escape "$REPO")"
+  XML_PORT="$(xml_escape "$PORT")"
+  XML_GW="$(xml_escape "$GATEWAY_URL")"
+  XML_TOKEN="$(xml_escape "$TOKEN")"
+  XML_LOG="$(xml_escape "$HOME/Library/Logs/$NAME.log")"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$LABEL</string>
+  <key>Label</key><string>$XML_LABEL</string>
   <key>ProgramArguments</key>
-  <array><string>$NODE</string><string>$ENTRY</string><string>--http</string></array>
-  <key>WorkingDirectory</key><string>$REPO</string>
+  <array><string>$XML_NODE</string><string>$XML_ENTRY</string><string>--http</string></array>
+  <key>WorkingDirectory</key><string>$XML_REPO</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>MCP_HTTP_HOST</key><string>127.0.0.1</string>
-    <key>MCP_HTTP_PORT</key><string>$PORT</string>
-    <key>GATEWAY_URL</key><string>$GATEWAY_URL</string>
-    <key>MCP_AUTH_TOKEN</key><string>$TOKEN</string>
+    <key>MCP_HTTP_PORT</key><string>$XML_PORT</string>
+    <key>GATEWAY_URL</key><string>$XML_GW</string>
+    <key>MCP_AUTH_TOKEN</key><string>$XML_TOKEN</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>$HOME/Library/Logs/$NAME.log</string>
+  <key>StandardErrorPath</key><string>$XML_LOG</string>
 </dict>
 </plist>
 EOF

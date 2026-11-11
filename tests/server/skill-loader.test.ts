@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {clearSkillsCache, listResources, readSkillFile} from '../../src/server/skills/loader';
+import {clearSkillsCache, listResources, loadSkills, readSkillFile} from '../../src/server/skills/loader';
 
 test('Skill 资源列表递归发现嵌套参考文件', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'oh-my-sage-skill-'));
@@ -86,4 +86,47 @@ test('Skill 文件读取拒绝符号链接越界', {skip: process.platform === '
         fs.rmSync(root, {recursive: true, force: true});
         fs.rmSync(outside, {recursive: true, force: true});
     }
+});
+
+test('默认隔离宿主机 ~/.agents/skills，仅在显式开启 OH_MY_SAGE_LOAD_USER_SKILLS=true 时加载', () => {
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'oh-my-sage-home-'));
+    const userSkillDir = path.join(fakeHome, '.agents', 'skills', 'host-private-skill');
+    const prevHome = process.env.HOME;
+    const prevFlag = process.env.OH_MY_SAGE_LOAD_USER_SKILLS;
+
+    try {
+        fs.mkdirSync(userSkillDir, {recursive: true});
+        fs.writeFileSync(path.join(userSkillDir, 'SKILL.md'), [
+            '---',
+            'name: host-private-skill',
+            'description: private host skill',
+            '---',
+            'private',
+        ].join('\n'));
+
+        process.env.HOME = fakeHome;
+        delete process.env.OH_MY_SAGE_LOAD_USER_SKILLS;
+        clearSkillsCache();
+
+        const isolated = loadSkills();
+        assert.equal(isolated.some(s => s.name === 'host-private-skill'), false);
+
+        process.env.OH_MY_SAGE_LOAD_USER_SKILLS = 'true';
+        clearSkillsCache();
+        const optedIn = loadSkills();
+        assert.equal(optedIn.some(s => s.name === 'host-private-skill'), true);
+    } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+        if (prevFlag === undefined) delete process.env.OH_MY_SAGE_LOAD_USER_SKILLS;
+        else process.env.OH_MY_SAGE_LOAD_USER_SKILLS = prevFlag;
+        clearSkillsCache();
+        fs.rmSync(fakeHome, {recursive: true, force: true});
+    }
+});
+
+test('mijia-automation 内置规则文本格式参考可在沙箱内读取', () => {
+    clearSkillsCache();
+    const content = readSkillFile('mijia-automation', 'references/rule-text-format.md');
+    assert.ok(content && content.includes('# 规则文本格式'));
 });

@@ -3,8 +3,15 @@
  * 使用 JSONL 格式保存对话历史
  */
 
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+
+export const SESSION_ID_PATTERN = /^session_\d+_[a-z0-9]{1,24}$/;
+
+export function isValidSessionId(sessionId: string): boolean {
+    return typeof sessionId === 'string' && SESSION_ID_PATTERN.test(sessionId);
+}
 
 /**
  * Session 元数据
@@ -65,7 +72,22 @@ export class SessionStore {
      */
     private ensureDir(): void {
         if (!fs.existsSync(this.baseDir)) {
-            fs.mkdirSync(this.baseDir, {recursive: true});
+            fs.mkdirSync(this.baseDir, {recursive: true, mode: 0o700});
+        }
+    }
+
+    /**
+     * 拒绝操作符号链接文件
+     */
+    private assertNotSymlink(filePath: string): void {
+        try {
+            const stat = fs.lstatSync(filePath);
+            if (stat.isSymbolicLink()) {
+                throw new Error('拒绝读写符号链接文件');
+            }
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+            throw err;
         }
     }
 
@@ -77,10 +99,19 @@ export class SessionStore {
     }
 
     /**
-     * 获取 Session 文件路径
+     * 获取 Session 文件路径（严格校验 sessionId，防止目录遍历）
      */
     private getSessionPath(sessionId: string): string {
-        return path.join(this.baseDir, `${sessionId}.jsonl`);
+        if (!isValidSessionId(sessionId)) {
+            throw new Error('无效的 Session ID');
+        }
+        const resolved = path.resolve(this.baseDir, `${sessionId}.jsonl`);
+        const rel = path.relative(this.baseDir, resolved);
+        if (rel.startsWith('..') || path.isAbsolute(rel)) {
+            throw new Error('Session 路径越界');
+        }
+        this.assertNotSymlink(resolved);
+        return resolved;
     }
 
     /**
@@ -92,6 +123,7 @@ export class SessionStore {
             return {sessions: []};
         }
         try {
+            this.assertNotSymlink(indexPath);
             return JSON.parse(fs.readFileSync(indexPath, 'utf8'));
         } catch {
             return {sessions: []};
@@ -102,14 +134,16 @@ export class SessionStore {
      * 写入索引
      */
     private writeIndex(index: SessionIndex): void {
-        fs.writeFileSync(this.getIndexPath(), JSON.stringify(index, null, 2));
+        const indexPath = this.getIndexPath();
+        this.assertNotSymlink(indexPath);
+        fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), {mode: 0o600});
     }
 
     /**
      * 生成唯一 ID
      */
     private generateId(): string {
-        return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        return `session_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
     }
 
     /**
@@ -130,7 +164,7 @@ export class SessionStore {
         };
 
         // 创建空的 Session 文件
-        fs.writeFileSync(this.getSessionPath(id), '');
+        fs.writeFileSync(this.getSessionPath(id), '', {mode: 0o600});
 
         // 更新索引
         const index = this.readIndex();
@@ -154,6 +188,9 @@ export class SessionStore {
      * 获取 Session 元数据
      */
     async getSessionMeta(sessionId: string): Promise<SessionMeta | null> {
+        if (!isValidSessionId(sessionId)) {
+            return null;
+        }
         const index = this.readIndex();
         return index.sessions.find(s => s.id === sessionId) || null;
     }
@@ -185,6 +222,10 @@ export class SessionStore {
      * 追加消息
      */
     async appendMessage(sessionId: string, message: Omit<SessionMessage, 'seq'>): Promise<SessionMessage> {
+        const meta = await this.getSessionMeta(sessionId);
+        if (!meta) {
+            throw new Error('Session 不存在');
+        }
         const messages = await this.getMessages(sessionId);
         const seq = messages.length;
 
@@ -195,7 +236,7 @@ export class SessionStore {
 
         // 追加到 JSONL 文件
         const sessionPath = this.getSessionPath(sessionId);
-        fs.appendFileSync(sessionPath, JSON.stringify(fullMessage) + '\n');
+        fs.appendFileSync(sessionPath, JSON.stringify(fullMessage) + '\n', {mode: 0o600});
 
         // 更新索引
         const index = this.readIndex();
@@ -263,13 +304,17 @@ export class SessionStore {
      * 用于"重做"功能：回到指定用户消息位置
      */
     async truncateSession(sessionId: string, keepSeq: number): Promise<void> {
+        const meta = await this.getSessionMeta(sessionId);
+        if (!meta) {
+            throw new Error('Session 不存在');
+        }
         const allMessages = await this.getMessages(sessionId);
         const keptMessages = allMessages.filter(m => m.seq <= keepSeq);
 
         // 重写 JSONL 文件
         const sessionPath = this.getSessionPath(sessionId);
         const content = keptMessages.map(m => JSON.stringify(m)).join('\n') + (keptMessages.length > 0 ? '\n' : '');
-        fs.writeFileSync(sessionPath, content);
+        fs.writeFileSync(sessionPath, content, {mode: 0o600});
 
         // 更新索引
         const index = this.readIndex();
@@ -290,13 +335,18 @@ export class SessionStore {
      * 更新 Session 元数据
      */
     async updateSessionMeta(sessionId: string, updates: Partial<SessionMeta>): Promise<void> {
+        if (!isValidSessionId(sessionId)) {
+            throw new Error('无效的 Session ID');
+        }
         const index = this.readIndex();
         const sessionIndex = index.sessions.findIndex(s => s.id === sessionId);
 
         if (sessionIndex >= 0) {
+            const currentId = index.sessions[sessionIndex].id;
             index.sessions[sessionIndex] = {
                 ...index.sessions[sessionIndex],
                 ...updates,
+                id: currentId,
                 updatedAt: new Date().toISOString(),
             };
             this.writeIndex(index);
@@ -306,17 +356,22 @@ export class SessionStore {
     /**
      * 删除 Session
      */
-    async deleteSession(sessionId: string): Promise<void> {
-        // 删除 Session 文件
+    async deleteSession(sessionId: string): Promise<boolean> {
         const sessionPath = this.getSessionPath(sessionId);
+        const index = this.readIndex();
+        const exists = index.sessions.some(s => s.id === sessionId);
+        if (!exists) {
+            return false;
+        }
+
         if (fs.existsSync(sessionPath)) {
             fs.unlinkSync(sessionPath);
         }
 
         // 从索引中移除
-        const index = this.readIndex();
         index.sessions = index.sessions.filter(s => s.id !== sessionId);
         this.writeIndex(index);
+        return true;
     }
 
     /**
@@ -327,6 +382,7 @@ export class SessionStore {
 
         // 删除所有 Session 文件
         for (const session of index.sessions) {
+            if (!isValidSessionId(session.id)) continue;
             const sessionPath = this.getSessionPath(session.id);
             if (fs.existsSync(sessionPath)) {
                 fs.unlinkSync(sessionPath);

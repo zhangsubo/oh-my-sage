@@ -1,8 +1,8 @@
 'use client';
 
-import React, {useState, useCallback, useRef} from 'react';
-import {Layout, Typography, Space, message, Tabs} from 'antd';
-import {RobotOutlined, HomeOutlined, ApartmentOutlined, ApiOutlined} from '@ant-design/icons';
+import React, {useState, useCallback, useRef, useEffect} from 'react';
+import {Layout, Typography, Space, message, Tabs, Spin} from 'antd';
+import {RobotOutlined, HomeOutlined, ApartmentOutlined, ApiOutlined, LoadingOutlined} from '@ant-design/icons';
 import Chat from '@/components/Chat';
 import DevicePanel from '@/components/DevicePanel';
 import GraphPanel from '@/components/GraphPanel';
@@ -40,8 +40,10 @@ interface GraphSummary {
 
 export default function HomePage() {
     const [collapsed, setCollapsed] = useState(false);
+    const [authChecking, setAuthChecking] = useState(true);
     const [isLoggedIn, setIsLoggedIn] = useState(false);
-    const [passcode, setPasscode] = useState('');
+    const [tokenRequired, setTokenRequired] = useState(false);
+    const [gatewayConnected, setGatewayConnected] = useState(false);
     const [devicesLoading, setDevicesLoading] = useState(false);
     const [devices, setDevices] = useState<any[]>([]);
     const [stats, setStats] = useState({total: 0, online: 0, offline: 0, rooms: 0});
@@ -59,6 +61,10 @@ export default function HomePage() {
         setDevicesLoading(true);
         try {
             const response = await fetch('/api/devices');
+            if (response.status === 401) {
+                setIsLoggedIn(false);
+                return;
+            }
             const result = await response.json();
             if (result.success) {
                 setDevices(result.devices || []);
@@ -77,6 +83,10 @@ export default function HomePage() {
         setSessionsLoading(true);
         try {
             const response = await fetch('/api/sessions');
+            if (response.status === 401) {
+                setIsLoggedIn(false);
+                return;
+            }
             const result = await response.json();
             if (result.success) {
                 setSessions(result.sessions || []);
@@ -92,6 +102,10 @@ export default function HomePage() {
         setGraphsLoading(true);
         try {
             const response = await fetch('/api/graphs');
+            if (response.status === 401) {
+                setIsLoggedIn(false);
+                return;
+            }
             const result = await response.json();
             if (result.success) {
                 setGraphs(result.graphs || []);
@@ -104,8 +118,33 @@ export default function HomePage() {
         }
     }, []);
 
-    const handleLoginSuccess = async (code: string) => {
-        setPasscode(code);
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const response = await fetch('/api/auth');
+                const result = await response.json();
+                if (cancelled) return;
+                setTokenRequired(Boolean(result.tokenRequired));
+                setGatewayConnected(Boolean(result.connected));
+                if (result.authenticated) {
+                    setIsLoggedIn(true);
+                    await Promise.all([loadDevices(), loadSessions()]);
+                }
+            } catch {
+                // 保持未登录态，展示登录页
+            } finally {
+                if (!cancelled) {
+                    setAuthChecking(false);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [loadDevices, loadSessions]);
+
+    const handleLoginSuccess = async () => {
         setIsLoggedIn(true);
         await Promise.all([loadDevices(), loadSessions()]);
     };
@@ -113,19 +152,19 @@ export default function HomePage() {
     const handleSelectSession = async (sessionId: string) => {
         setActiveSessionId(sessionId);
         try {
-            const response = await fetch(`/api/sessions/${sessionId}`);
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
             const result = await response.json();
             if (result.success) {
                 setCurrentMessages(result.messages || []);
             }
-        } catch (error) {
+        } catch {
             message.error('加载 Session 消息失败');
         }
     };
 
     const handleDeleteSession = async (sessionId: string) => {
         try {
-            const response = await fetch(`/api/sessions/${sessionId}`, {method: 'DELETE'});
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {method: 'DELETE'});
             const result = await response.json();
             if (result.success) {
                 setSessions(prev => prev.filter(s => s.id !== sessionId));
@@ -135,7 +174,7 @@ export default function HomePage() {
                 }
                 message.success('Session 已删除');
             }
-        } catch (error) {
+        } catch {
             message.error('删除 Session 失败');
         }
     };
@@ -153,7 +192,7 @@ export default function HomePage() {
 
     const handleResetSession = useCallback(async (sessionId: string, seq: number) => {
         try {
-            const response = await fetch(`/api/sessions/${sessionId}`, {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({action: 'truncate', seq}),
@@ -184,14 +223,14 @@ export default function HomePage() {
             } else {
                 message.error(result.message || '操作失败');
             }
-        } catch (error) {
+        } catch {
             message.error('切换规则状态失败');
         }
     };
 
     const handleDeleteGraph = async (id: string) => {
         try {
-            const response = await fetch(`/api/graphs?id=${id}`, {method: 'DELETE'});
+            const response = await fetch(`/api/graphs?id=${encodeURIComponent(id)}`, {method: 'DELETE'});
             const result = await response.json();
             if (result.success) {
                 setGraphs(prev => prev.filter(g => g.id !== id));
@@ -199,7 +238,7 @@ export default function HomePage() {
             } else {
                 message.error(result.message || '删除失败');
             }
-        } catch (error) {
+        } catch {
             message.error('删除规则失败');
         }
     };
@@ -210,8 +249,28 @@ export default function HomePage() {
         }
     };
 
+    if (authChecking) {
+        return (
+            <div style={{
+                height: '100vh',
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                background: 'var(--bg-deep)',
+            }}>
+                <Spin indicator={<LoadingOutlined style={{fontSize: 28, color: '#818cf8'}} spin/>}/>
+            </div>
+        );
+    }
+
     if (!isLoggedIn) {
-        return <LoginPage onLoginSuccess={handleLoginSuccess}/>;
+        return (
+            <LoginPage
+                onLoginSuccess={handleLoginSuccess}
+                tokenRequired={tokenRequired}
+                gatewayConnected={gatewayConnected}
+            />
+        );
     }
 
     return (
@@ -331,7 +390,6 @@ export default function HomePage() {
                             }}
                         >
                             <Chat
-                                passcode={passcode}
                                 sessionId={activeSessionId}
                                 initialMessages={currentMessages}
                                 onSessionCreated={handleSessionCreated}

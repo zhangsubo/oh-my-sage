@@ -5,6 +5,7 @@
 
 import {NextRequest, NextResponse} from 'next/server';
 import {getGateway, isGatewayConnected} from '@/server/gateway/shared';
+import {guardWebRequest} from '@/server/security/webAuth';
 import {createGraph, deleteGraph, toggleGraph, updateGraph} from '@/core';
 import {z} from 'zod';
 
@@ -21,7 +22,10 @@ const updateSchema = z.object({id: z.string().min(1), name: z.string().trim().mi
  * GET 请求处理
  * 从网关获取规则列表
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         // 检查网关连接
         if (!isGatewayConnected()) {
@@ -68,6 +72,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
         const parsed = createSchema.safeParse(await request.json());
@@ -81,6 +88,9 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         if (!isGatewayConnected()) return NextResponse.json({success: false, error: '未连接到网关'}, {status: 400});
         const parsed = updateSchema.safeParse(await request.json());
@@ -98,6 +108,9 @@ export async function PUT(request: NextRequest) {
  * 启用/禁用规则
  */
 export async function PATCH(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         // 检查网关连接
         if (!isGatewayConnected()) {
@@ -110,7 +123,7 @@ export async function PATCH(request: NextRequest) {
         const body = await request.json();
         const {id, enable} = body;
 
-        if (!id) {
+        if (!id || typeof id !== 'string') {
             return NextResponse.json({
                 success: false,
                 error: '缺少规则 ID',
@@ -142,6 +155,9 @@ export async function PATCH(request: NextRequest) {
  * 删除规则
  */
 export async function DELETE(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         // 检查网关连接
         if (!isGatewayConnected()) {

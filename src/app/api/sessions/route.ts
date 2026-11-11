@@ -4,7 +4,8 @@
  */
 
 import {NextRequest, NextResponse} from 'next/server';
-import {getSessionStore} from '@/server/session/store';
+import {getSessionStore, isValidSessionId} from '@/server/session/store';
+import {guardWebRequest} from '@/server/security/webAuth';
 
 export const runtime = 'nodejs';
 
@@ -12,7 +13,10 @@ export const runtime = 'nodejs';
  * GET /api/sessions
  * 获取 Session 列表
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         const store = getSessionStore();
         const sessions = await store.listSessions();
@@ -37,9 +41,12 @@ export async function GET() {
  * 创建新 Session
  */
 export async function POST(request: NextRequest) {
+    const blocked = guardWebRequest(request, {requireJsonBody: true});
+    if (blocked) return blocked;
+
     try {
         const body = await request.json().catch(() => ({}));
-        const {title} = body;
+        const title = typeof body?.title === 'string' ? body.title : undefined;
 
         const store = getSessionStore();
         const session = await store.createSession(title);
@@ -63,6 +70,9 @@ export async function POST(request: NextRequest) {
  * 删除 Session
  */
 export async function DELETE(request: NextRequest) {
+    const blocked = guardWebRequest(request);
+    if (blocked) return blocked;
+
     try {
         const {searchParams} = new URL(request.url);
         const id = searchParams.get('id');
@@ -74,8 +84,21 @@ export async function DELETE(request: NextRequest) {
             }, {status: 400});
         }
 
+        if (!isValidSessionId(id)) {
+            return NextResponse.json({
+                success: false,
+                error: '无效的 Session ID',
+            }, {status: 400});
+        }
+
         const store = getSessionStore();
-        await store.deleteSession(id);
+        const deleted = await store.deleteSession(id);
+        if (!deleted) {
+            return NextResponse.json({
+                success: false,
+                error: 'Session 不存在',
+            }, {status: 404});
+        }
 
         return NextResponse.json({
             success: true,

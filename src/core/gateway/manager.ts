@@ -8,7 +8,7 @@
  * - 登录请求串行执行，避免两个并发登录互相覆盖。
  */
 
-import { GatewayClient } from './client';
+import { GatewayClient, validateGatewayUrl } from './client';
 import { getDeviceList } from '../tools/gatewayCache';
 import { fetchMiotSpec } from '../tools/device';
 
@@ -84,6 +84,7 @@ export function createGatewayManager(options: GatewayManagerOptions = {}): Gatew
         if (!url) {
             throw new Error('未配置网关地址：请在 mijia_auth 的 gateway_url 参数中提供网关地址，或在 MCP 配置里设置 GATEWAY_URL 环境变量');
         }
+        validateGatewayUrl(url);
 
         const next = createClient();
         try {

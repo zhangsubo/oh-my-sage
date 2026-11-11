@@ -37,7 +37,7 @@ Returns: 紧凑 JSON {method, params, result}`,
       inputSchema: z.object({
         method: z.string().min(1).describe("API 方法名"),
         params: z.record(z.unknown()).default({}).describe("参数对象"),
-        timeout: z.number().int().positive().default(10000).describe("超时时间毫秒"),
+        timeout: z.number().int().positive().max(60000).default(10000).describe("超时时间毫秒（最大 60000）"),
         max_bytes: z.number().int().min(1000).max(MAX_RESULT_BYTES).optional().default(MAX_RESULT_BYTES).describe("结果文本上限（字节），默认且最大 40000"),
       }),
       annotations: {
